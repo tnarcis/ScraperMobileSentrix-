@@ -1135,10 +1135,32 @@ class DatabaseManager:
         c_alias = change_alias.strip()
         p_alias = product_alias.strip()
         return (
-            f"(({c_alias}.old_value IS NULL OR TRIM({c_alias}.old_value) = '') "
+            f"(LOWER({c_alias}.change_type) NOT IN ('new', 'product_new', 'new_product')"
+            f" AND ({c_alias}.old_value IS NULL OR TRIM({c_alias}.old_value) = '') "
             f" AND ({c_alias}.new_value IS NOT NULL AND TRIM({c_alias}.new_value) != '') "
             f" AND datetime({c_alias}.changed_at) <= datetime({p_alias}.created_at))"
         )
+
+    def _normalize_stock_state(self, value: Optional[str]) -> str:
+        if not value:
+            return ''
+
+        text = re.sub(r'[^a-z0-9]+', ' ', value, flags=re.IGNORECASE).strip().lower()
+        if not text:
+            return ''
+
+        in_stock_markers = ['in stock', 'instock', 'available', 'ready', 'yes', 'available now']
+        out_stock_markers = ['out of stock', 'sold out', 'oos', 'unavailable', 'no stock']
+        backorder_markers = ['backorder', 'back order', 'preorder', 'pre order', 'back-ordered']
+
+        if any(marker in text for marker in in_stock_markers):
+            return 'in_stock'
+        if any(marker in text for marker in out_stock_markers):
+            return 'out_of_stock'
+        if any(marker in text for marker in backorder_markers):
+            return 'backorder'
+
+        return text
 
     def _log_product_change(
         self,
@@ -1204,9 +1226,14 @@ class DatabaseManager:
         change_type: str,
         old_display: str,
         new_display: str,
-        delta: Optional[float]
+        delta: Optional[float],
+        old_raw: Optional[str] = None,
+        new_raw: Optional[str] = None
     ) -> str:
         normalized = (change_type or '').strip().lower()
+
+        if normalized in {'new', 'product_new', 'new_product'}:
+            return 'New product added'
 
         if normalized == 'price':
             if isinstance(delta, (int, float)) and abs(delta) >= 1e-9:
@@ -1214,6 +1241,15 @@ class DatabaseManager:
             return 'Price changed'
 
         if normalized == 'stock':
+            old_state = self._normalize_stock_state(old_raw or old_display)
+            new_state = self._normalize_stock_state(new_raw or new_display)
+
+            if new_state == 'in_stock' and old_state != 'in_stock':
+                return 'Back in stock'
+            if new_state == 'out_of_stock' and old_state != 'out_of_stock':
+                return 'Out of stock'
+            if new_state == 'backorder' and old_state != 'backorder':
+                return 'Backorder status updated'
             return 'Stock status changed'
 
         if normalized == 'description':
@@ -1344,6 +1380,22 @@ class DatabaseManager:
                     now,
                     json.dumps(baseline_payload, ensure_ascii=False)
                 ))
+
+                change_metadata = {
+                    "price": product_data.get('price'),
+                    "stock_status": product_data.get('stock_status', ''),
+                    "sku": product_data['sku'],
+                    "product_url": product_data.get('product_url')
+                }
+
+                self._log_product_change(
+                    product_id,
+                    'new',
+                    old_value=None,
+                    new_value=product_data.get('title') or product_data['sku'],
+                    changed_at=now,
+                    metadata=change_metadata
+                )
 
             else:
                 # Update existing product
@@ -2028,7 +2080,14 @@ class DatabaseManager:
                     chipset = self._extract_chipset(variant_details, metadata, row['title'])
 
                     delta_display = self._format_change_delta_text(row['change_type'], difference)
-                    change_label = self._build_change_label(row['change_type'], old_display, new_display, difference)
+                    change_label = self._build_change_label(
+                        row['change_type'],
+                        old_display,
+                        new_display,
+                        difference,
+                        raw_old,
+                        raw_new
+                    )
 
                     changes.append({
                         "product_title": product_title,

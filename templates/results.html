@@ -26,7 +26,7 @@
     body{font-family:var(--font-sans,'Plus Jakarta Sans','Segoe UI',sans-serif);background:var(--page-bg,linear-gradient(180deg,#0a0e27 0%,#1a1f3a 100%));color:var(--text,#e8eaed);min-height:100vh;line-height:1.6}
     .page-shell{max-width:1400px;margin:0 auto;padding:var(--space-sm,1rem);opacity:0;animation:fadeIn .3s ease forwards}
         @keyframes fadeIn{to{opacity:1}}
-        .top-bar,.cy-card{background:var(--panel,rgba(255,255,255,0.05));border-radius:16px;padding:1.5rem;border:1px solid var(--border,rgba(135,144,199,0.28));box-shadow:var(--shadow,0 4px 16px rgba(3,10,32,0.3))}
+        .top-bar,.cy-card{background:var(--panel,rgba(255,255,255,0.05));border-radius:20px;padding:1.5rem;border:1px solid var(--border,rgba(135,144,199,0.28));box-shadow:var(--shadow,0 24px 60px rgba(4,12,32,0.35));backdrop-filter:blur(28px)}
         .overlay{position:fixed;inset:0;background:var(--overlay-backdrop,rgba(10,14,39,0.95));display:flex;align-items:center;justify-content:center;z-index:9999}
         .d-none{display:none!important}
     </style>
@@ -53,20 +53,22 @@
             <button type="button" class="btn-close" data-bs-dismiss="alert" aria-label="Close"></button>
         </div>
         <!-- Header -->
-        <header class="top-bar cy-card mb-3">
-            <div class="header-main">
+        <header class="top-bar cy-card results-header mb-3">
+            <div class="results-header__top">
                 <div class="header-brand">
                     <h1 class="header-title">Results Dashboard</h1>
                     <p class="header-subtitle">Live scraping progress &amp; data insights</p>
                 </div>
-                <nav class="nav-pills">
+                <nav class="nav-pills results-nav">
                     <a href="/" class="nav-link">Extractor</a>
                     <a href="/results" class="nav-link active">Results</a>
                     <a href="/history" class="nav-link">History</a>
                     <a href="/image-converter" class="nav-link">Images</a>
                     <a href="/instructions" class="nav-link">Instructions</a>
                 </nav>
-                <div class="header-stats">
+            </div>
+            <div class="results-header__controls">
+                <div class="control-tile control-tile--client">
                     <div class="stat-item stat-item--compact">
                         <span class="stat-label">Active Client</span>
                         <div class="client-selector-group">
@@ -82,6 +84,8 @@
                             </select>
                         </div>
                     </div>
+                </div>
+                <div class="control-tile">
                     <div class="stat-item stat-item--compact">
                         <span class="stat-label">Max Pages / Category</span>
                         <div class="input-group input-group-sm">
@@ -89,6 +93,8 @@
                             <span class="input-group-text">pages</span>
                         </div>
                     </div>
+                </div>
+                <div class="control-tile control-tile--category">
                     <div class="category-control">
                         <span class="stat-label">Category Scope</span>
                         <div class="category-control__actions">
@@ -99,11 +105,14 @@
                             <span class="category-summary" id="categorySummary">Scraping all categories</span>
                         </div>
                     </div>
-                    <button id="runScrapeBtn" class="btn btn-primary btn-cy run-scrape-btn">
+                </div>
+                <div class="control-tile control-tile--actions">
+                    <div class="control-actions">
+                        <button id="runScrapeBtn" type="button" class="btn btn-primary btn-cy run-scrape-btn">
                         <span class="btn-icon">⚡</span>
                         <span class="btn-text">Run Scrape</span>
                     </button>
-                    <button id="stopScrapeBtn" class="btn btn-outline btn-cy run-scrape-btn" disabled>
+                    <button id="stopScrapeBtn" type="button" class="btn btn-outline btn-cy run-scrape-btn" disabled>
                         <span class="btn-icon">✋</span>
                         <span class="btn-text">Stop</span>
                     </button>
@@ -111,6 +120,7 @@
                         <span class="btn-icon">🗘</span>
                         <span class="btn-text">Progress</span>
                     </button>
+                    </div>
                     <div class="switch-wrap">
                         <label class="form-check-label" for="darkMode">Light</label>
                         <div class="form-check form-switch m-0">
@@ -256,9 +266,13 @@
                     <div class="col-sm-6 col-lg-3">
                         <label class="form-label text-muted mb-1">Change Types</label>
                         <div class="d-flex gap-3">
-                            <div class="form-check">
-                                <input class="form-check-input" type="checkbox" name="change_types" value="price" checked id="priceCheck">
-                                <label class="form-check-label" for="priceCheck">Price</label>
+                                <div class="form-check form-check-inline">
+                                    <input class="form-check-input" type="checkbox" name="change_types" value="new" checked id="newCheck">
+                                    <label class="form-check-label" for="newCheck">New Products</label>
+                                </div>
+                                <div class="form-check">
+                                    <input class="form-check-input" type="checkbox" name="change_types" value="price" checked id="priceCheck">
+                                    <label class="form-check-label" for="priceCheck">Price</label>
                             </div>
                             <div class="form-check">
                                 <input class="form-check-input" type="checkbox" name="change_types" value="stock" checked id="stockCheck">
@@ -317,6 +331,16 @@
             </div>
 
             <div id="changesSummary" class="changes-summary" hidden></div>
+
+            <div id="firstRunBanner" class="first-run-banner d-none" role="status" aria-live="polite">
+                <div class="first-run-banner__icon">🎉</div>
+                <div>
+                    <p class="first-run-banner__title mb-1">First run complete</p>
+                    <p class="first-run-banner__text mb-0">
+                        Showing <span id="firstRunCount">0</span> products from the initial crawl. Run the scraper a second time to highlight price, stock, and description changes here.
+                    </p>
+                </div>
+            </div>
 
             <!-- Card Grid -->
             <div id="changesGrid" class="results-grid">

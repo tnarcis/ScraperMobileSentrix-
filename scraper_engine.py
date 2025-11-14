@@ -19,8 +19,10 @@ import time
 import random
 import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, urljoin, parse_qs, urlencode, urlunparse
+from collections import deque
+import html
 from dataclasses import dataclass
-from typing import List, Optional, Tuple, Set, Dict, Any
+from typing import List, Optional, Tuple, Set, Dict, Any, Deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 from logger import log_scrape_start, log_scrape_page, log_scrape_complete, log_scrape_error, log_discovery, log_cf_detected
@@ -823,6 +825,129 @@ def probe_infinite_scroll_next_page(
 
     return None
 
+
+def _normalize_infinite_url(candidate: Optional[str], base_url: str) -> Optional[str]:
+    if not candidate:
+        return None
+
+    cleaned = html.unescape(candidate).replace('\\/', '/').strip()
+    if not cleaned:
+        return None
+
+    try:
+        return urljoin(base_url, cleaned)
+    except Exception:
+        return None
+
+
+LOAD_MORE_ATTR_MAP = {
+    '[data-load-more-url]': 'data-load-more-url',
+    '[data-loadmore-url]': 'data-loadmore-url',
+    '[data-next-url]': 'data-next-url',
+    '[data-url][data-role*="load"]': 'data-url',
+    '[data-href][data-role*="load"]': 'data-href'
+}
+
+LOAD_MORE_REGEXES = [
+    re.compile(r'"loadMoreUrl"\s*:\s*"([^"]+)"', re.IGNORECASE),
+    re.compile(r'"nextUrl"\s*:\s*"([^"]+)"', re.IGNORECASE),
+    re.compile(r'\'loadMoreUrl\'\s*:\s*\'([^\']+)\'', re.IGNORECASE),
+    re.compile(r'data-load-more-url="([^"]+)"', re.IGNORECASE)
+]
+
+
+def extract_infinite_scroll_urls(soup: BeautifulSoup, current_url: str) -> List[str]:
+    """Grab potential load-more endpoints from DOM/script hints."""
+    urls: List[str] = []
+
+    for selector, attr in LOAD_MORE_ATTR_MAP.items():
+        for element in soup.select(selector):
+            raw_value = element.attrs.get(attr) or element.attrs.get('data-href') or element.attrs.get('href')
+            normalized = _normalize_infinite_url(raw_value, current_url)
+            if normalized and normalized not in urls:
+                urls.append(normalized)
+
+    for script in soup.find_all('script'):
+        text = script.string or script.get_text() or ''
+        if not text:
+            continue
+        for pattern in LOAD_MORE_REGEXES:
+            for match in pattern.findall(text):
+                normalized = _normalize_infinite_url(match, current_url)
+                if normalized and normalized not in urls:
+                    urls.append(normalized)
+
+    return urls
+
+
+def fetch_infinite_scroll_page(sess, target_url: str, site: str) -> Optional[Dict[str, Any]]:
+    """Fetch an infinite-scroll batch and return parsed items plus follow-up URLs."""
+    try:
+        fetch_start = time.time()
+        result = get_html_with_timing(sess, target_url)
+        fetch_time = (time.time() - fetch_start) * 1000
+    except Exception as fetch_error:
+        log_scrape_error(site, target_url, f"Load-more fetch failed: {fetch_error}")
+        return None
+
+    if result.get('error') or not result.get('html'):
+        return None
+
+    body = (result.get('html') or '').strip()
+    fragment_html = None
+    extra_urls: List[str] = []
+    payload = None
+
+    if body.startswith('{'):
+        try:
+            payload = json.loads(body)
+        except Exception:
+            payload = None
+
+    if isinstance(payload, dict):
+        fragment_html = payload.get('items_html') or payload.get('html') or payload.get('content')
+        for key in ('next_url', 'nextUrl', 'loadMoreUrl', 'load_more_url'):
+            normalized = _normalize_infinite_url(payload.get(key), target_url)
+            if normalized and normalized not in extra_urls:
+                extra_urls.append(normalized)
+
+        for key in ('additional_urls', 'more_urls', 'urls'):
+            values = payload.get(key)
+            if isinstance(values, list):
+                for val in values:
+                    normalized = _normalize_infinite_url(val, target_url)
+                    if normalized and normalized not in extra_urls:
+                        extra_urls.append(normalized)
+
+    parse_source = fragment_html if fragment_html else body
+    parse_start = time.time()
+    soup = BeautifulSoup(parse_source, PARSER)
+
+    if site == 'mobilesentrix':
+        items = parse_mobilesentrix_products(soup, target_url)
+    elif site == 'xcellparts':
+        items = parse_xcell_products(soup, target_url)
+    else:
+        items = []
+
+    parse_time = (time.time() - parse_start) * 1000
+
+    dom_urls = extract_infinite_scroll_urls(soup, target_url)
+    for candidate in dom_urls:
+        if candidate not in extra_urls:
+            extra_urls.append(candidate)
+
+    return {
+        'url': target_url,
+        'result': result,
+        'soup': soup,
+        'items': items,
+        'fetch_time': result.get('ttfb_ms', fetch_time),
+        'parse_time': parse_time,
+        'cf_detected': result.get('cf_detected', False),
+        'extra_load_more': extra_urls
+    }
+
 def parse_mobilesentrix_products(soup: BeautifulSoup, page_url: str) -> List[Item]:
     """Parse product listings from MobileSentrix page"""
     items = []
@@ -875,8 +1000,6 @@ def parse_mobilesentrix_products(soup: BeautifulSoup, page_url: str) -> List[Ite
     else:
         print(f"DEBUG: No product cards found in container!")
         print(f"DEBUG: Container HTML preview: {str(container)[:200]}...")
-    
-    cards = cards[:50]  # Limit to prevent spam
     
     for card in cards:
         try:
@@ -1106,6 +1229,8 @@ def scrape_category_with_pagination(category_url: str, site: str, max_pages: Opt
     total_parse_time = 0
     prefetched_data: Optional[Dict[str, Any]] = None
     seen_product_urls: Set[str] = set()
+    load_more_queue: Deque[str] = deque()
+    load_more_seen: Set[str] = set()
     
     sess, is_curl = build_session()
     
@@ -1125,6 +1250,13 @@ def scrape_category_with_pagination(category_url: str, site: str, max_pages: Opt
                 fetch_time = prefetched_data.get('fetch_time', result.get('ttfb_ms', 0))
                 parse_time = prefetched_data.get('parse_time', 0)
                 prefetched_data = None
+
+                if site == 'mobilesentrix':
+                    new_candidates = extract_infinite_scroll_urls(soup, current_url)
+                    for candidate in new_candidates:
+                        if candidate and candidate not in load_more_seen and candidate not in visited_urls:
+                            load_more_seen.add(candidate)
+                            load_more_queue.append(candidate)
             else:
                 # Fetch page with timing
                 fetch_start = time.time()
@@ -1156,6 +1288,13 @@ def scrape_category_with_pagination(category_url: str, site: str, max_pages: Opt
 
                 parse_time = (time.time() - parse_start) * 1000
 
+                if site == 'mobilesentrix':
+                    new_candidates = extract_infinite_scroll_urls(soup, current_url)
+                    for candidate in new_candidates:
+                        if candidate and candidate not in load_more_seen and candidate not in visited_urls:
+                            load_more_seen.add(candidate)
+                            load_more_queue.append(candidate)
+
             total_fetch_time += result.get('ttfb_ms', fetch_time)
             total_parse_time += parse_time
 
@@ -1184,6 +1323,29 @@ def scrape_category_with_pagination(category_url: str, site: str, max_pages: Opt
             
             # Find next page
             next_url = find_next_page_url(soup, current_url, site)
+
+            if not next_url and site == 'mobilesentrix' and load_more_queue:
+                while load_more_queue and not next_url:
+                    candidate_url = load_more_queue.popleft()
+                    if candidate_url in visited_urls:
+                        continue
+
+                    prefetch_page = fetch_infinite_scroll_page(sess, candidate_url, site)
+                    if not prefetch_page or not prefetch_page.get('items'):
+                        continue
+
+                    prefetched_data = prefetch_page
+                    next_url = prefetch_page['url']
+
+                    for extra_url in prefetch_page.get('extra_load_more', []) or []:
+                        if extra_url and extra_url not in load_more_seen and extra_url not in visited_urls:
+                            load_more_seen.add(extra_url)
+                            load_more_queue.append(extra_url)
+
+                    if prefetch_page.get('cf_detected'):
+                        cf_detected = True
+
+                    break
             
             # Heuristic check: if we got exactly common page sizes, probe next page
             if not next_url:

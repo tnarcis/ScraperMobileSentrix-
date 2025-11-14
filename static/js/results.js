@@ -15,7 +15,7 @@ class ResultsDashboard {
         this.viewModeStorageKey = 'results_view_mode';
         this.ACTIVE_JOB_STORAGE_KEY = 'results_active_job_id';
         this.filters = {
-            changeTypes: ['price', 'stock', 'description'],
+            changeTypes: ['new', 'price', 'stock', 'description'],
             fromDate: null,
             toDate: null,
             searchQuery: '',
@@ -36,6 +36,8 @@ class ResultsDashboard {
         this.totalRecords = 0;
         this.currentJobSnapshot = null;
     this.autoLimitSummary = null;
+        this.firstRunBanner = document.getElementById('firstRunBanner');
+        this.firstRunCountEl = document.getElementById('firstRunCount');
     }
 
     buildProductCell(change) {
@@ -180,29 +182,66 @@ class ResultsDashboard {
         }
         container.appendChild(titleEl);
 
-    const metaEl = document.createElement('div');
-    metaEl.className = 'product-meta change-table__meta';
-        const metaText = this.formatProductMeta(change);
-        metaEl.textContent = metaText;
-        metaEl.title = metaText;
-        container.appendChild(metaEl);
+        const metaPills = this.buildProductMetaPills(change);
+        if (metaPills) {
+            container.appendChild(metaPills);
+        }
 
         return container;
     }
 
-    formatProductMeta(change) {
-        const sku = (change.sku || '').toString().trim();
+    buildProductMetaPills(change) {
+        const entries = [];
+        const cleanedSku = this.formatSku(change.sku);
+        if (cleanedSku && cleanedSku !== 'NO SKU') {
+            entries.push({ label: 'SKU', value: cleanedSku });
+        }
+
         const category = (change.category || '').toString().trim();
-        const parts = [];
-
-        if (sku) {
-            parts.push(sku);
-        }
         if (category) {
-            parts.push(category);
+            entries.push({ label: 'Category', value: category });
         }
 
-        return parts.join(' • ') || '—';
+        const brand = (change.brand || change.vendor || change.brand_name || '').toString().trim();
+        if (brand) {
+            entries.push({ label: 'Brand', value: brand });
+        }
+
+        const unique = [];
+        const seen = new Set();
+        entries.forEach((entry) => {
+            if (!entry.value) {
+                return;
+            }
+            const key = `${entry.label}|${entry.value}`.toLowerCase();
+            if (seen.has(key)) {
+                return;
+            }
+            seen.add(key);
+            unique.push(entry);
+        });
+
+        if (!unique.length) {
+            return null;
+        }
+
+        const wrapper = document.createElement('div');
+        wrapper.className = 'change-card__meta';
+        unique.forEach(({ label, value }) => {
+            const pill = document.createElement('div');
+            pill.className = 'change-card__meta-pill';
+            const labelSpan = document.createElement('span');
+            labelSpan.className = 'change-card__meta-label';
+            labelSpan.textContent = label;
+            const valueSpan = document.createElement('span');
+            valueSpan.className = 'change-card__meta-value';
+            valueSpan.textContent = value;
+            pill.title = value;
+            pill.append(labelSpan, valueSpan);
+            wrapper.appendChild(pill);
+        });
+
+        return wrapper;
     }
 
     getChangeLabel(change) {
@@ -216,6 +255,10 @@ class ResultsDashboard {
 
         const type = (change.change_type || '').toString().toLowerCase();
 
+        if (['new', 'product_new', 'new_product'].includes(type)) {
+            return 'New product added';
+        }
+
         if (type === 'price') {
             const deltaInfo = this.formatDelta(change);
             if (deltaInfo && deltaInfo.direction === 'up') {
@@ -228,6 +271,20 @@ class ResultsDashboard {
         }
 
         if (type === 'stock') {
+            const oldSource = change.old_value_raw ?? change.old_value ?? '';
+            const newSource = change.new_value_raw ?? change.new_value ?? '';
+            const oldState = this.normalizeStockState(oldSource);
+            const newState = this.normalizeStockState(newSource);
+
+            if (newState === 'in_stock' && oldState !== 'in_stock') {
+                return 'Back in stock';
+            }
+            if (newState === 'out_of_stock' && oldState !== 'out_of_stock') {
+                return 'Out of stock';
+            }
+            if (newState === 'backorder' && oldState !== 'backorder') {
+                return 'Backorder status updated';
+            }
             return 'Stock status changed';
         }
 
@@ -236,6 +293,34 @@ class ResultsDashboard {
         }
 
         return 'Value updated';
+    }
+
+    normalizeStockState(value) {
+        if (value == null) {
+            return '';
+        }
+
+        const cleaned = value.toString().trim().toLowerCase();
+        if (!cleaned) {
+            return '';
+        }
+
+        const compact = cleaned.replace(/[^a-z0-9]+/g, ' ');
+        const inStockMarkers = ['in stock', 'instock', 'available', 'ready', 'available now'];
+        const outStockMarkers = ['out of stock', 'sold out', 'oos', 'unavailable', 'no stock'];
+        const backorderMarkers = ['backorder', 'back order', 'preorder', 'pre order', 'back-ordered'];
+
+        if (inStockMarkers.some((marker) => compact.includes(marker))) {
+            return 'in_stock';
+        }
+        if (outStockMarkers.some((marker) => compact.includes(marker))) {
+            return 'out_of_stock';
+        }
+        if (backorderMarkers.some((marker) => compact.includes(marker))) {
+            return 'backorder';
+        }
+
+        return compact;
     }
 
     formatDelta(change) {
@@ -1222,6 +1307,21 @@ class ResultsDashboard {
         }
     }
 
+    toggleFirstRunBanner(isVisible, count = 0) {
+        if (!this.firstRunBanner) {
+            return;
+        }
+
+        if (isVisible) {
+            if (this.firstRunCountEl) {
+                this.firstRunCountEl.textContent = Number(count).toLocaleString();
+            }
+            this.firstRunBanner.classList.remove('d-none');
+        } else {
+            this.firstRunBanner.classList.add('d-none');
+        }
+    }
+
     updateChangesGrid(changes) {
         const grid = document.getElementById('changesGrid');
         if (!grid) {
@@ -1232,6 +1332,11 @@ class ResultsDashboard {
         grid.innerHTML = '';
 
         this.updateChangeSummary(changes);
+
+        const isBaselineOnly = Array.isArray(changes)
+            && changes.length > 0
+            && changes.every((change) => change.is_baseline);
+        this.toggleFirstRunBanner(isBaselineOnly, Array.isArray(changes) ? changes.length : 0);
 
         if (!Array.isArray(changes) || changes.length === 0) {
             const emptyState = document.createElement('div');
@@ -1286,7 +1391,15 @@ class ResultsDashboard {
         const parts = [];
 
         if (Array.isArray(this.filters.changeTypes) && this.filters.changeTypes.length) {
-            if (this.filters.changeTypes.length === 3) {
+            const defaultTypes = ['new', 'price', 'stock', 'description'];
+            const normalizedSelected = [...this.filters.changeTypes]
+                .map((type) => type.toString().toLowerCase())
+                .sort();
+            const normalizedDefault = [...defaultTypes].sort();
+            const allTypesSelected = normalizedSelected.length === normalizedDefault.length
+                && normalizedSelected.every((type, idx) => type === normalizedDefault[idx]);
+
+            if (allTypesSelected) {
                 parts.push('All change types');
             } else {
                 const formatted = this.filters.changeTypes
@@ -1447,23 +1560,7 @@ class ResultsDashboard {
 
         const footer = document.createElement('div');
         footer.className = 'change-card__footer';
-
-        const footerMeta = document.createElement('div');
-        footerMeta.className = 'change-card__footer-meta';
-
-        const skuLabel = document.createElement('span');
-        skuLabel.className = 'change-card__sku';
-        skuLabel.textContent = this.formatSku(change.sku);
-        footerMeta.appendChild(skuLabel);
-
-        if (change.category) {
-            const categoryLabel = document.createElement('span');
-            categoryLabel.className = 'change-card__category';
-            categoryLabel.textContent = change.category;
-            footerMeta.appendChild(categoryLabel);
-        }
-
-        footer.appendChild(footerMeta);
+        let footerHasContent = false;
 
         if (change.product_url || change.url) {
             const viewBtn = document.createElement('a');
@@ -1473,9 +1570,12 @@ class ResultsDashboard {
             viewBtn.target = '_blank';
             viewBtn.rel = 'noopener';
             footer.appendChild(viewBtn);
+            footerHasContent = true;
         }
 
-        card.appendChild(footer);
+        if (footerHasContent) {
+            card.appendChild(footer);
+        }
 
         return card;
     }
@@ -1641,6 +1741,7 @@ class ResultsDashboard {
             }
 
             console.info('Stop request acknowledged:', data.message || data.status);
+            this.pollJobStatus();
         } catch (error) {
             console.error('Error stopping scrape:', error);
             this.showError('Failed to stop scrape: ' + error.message);
@@ -2876,17 +2977,21 @@ class ResultsDashboard {
             return 'Update';
         }
 
+        const normalized = type.toString().trim().toLowerCase();
         const lookup = {
             price: 'Price',
             stock: 'Stock',
-            description: 'Description'
+            description: 'Description',
+            new: 'New',
+            new_product: 'New',
+            product_new: 'New'
         };
 
-        if (lookup[type]) {
-            return lookup[type];
+        if (lookup[normalized]) {
+            return lookup[normalized];
         }
 
-        const friendly = type.replace(/[_-]+/g, ' ');
+        const friendly = normalized.replace(/[_-]+/g, ' ');
         return this.capitalizeWords(friendly);
     }
 
@@ -2902,6 +3007,8 @@ class ResultsDashboard {
                 return 'New Stock';
             case 'description':
                 return 'New Description';
+            case 'new':
+                return 'New Product';
             default:
                 return 'New Data';
         }
@@ -2920,6 +3027,9 @@ class ResultsDashboard {
         }
         if (type === 'description') {
             return 'Initial description captured for this product.';
+        }
+        if (type === 'new') {
+            return 'Product discovered during the most recent run.';
         }
         return 'Initial data captured for this product.';
     }

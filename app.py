@@ -1997,7 +1997,9 @@ def api_results_recent():
             client = 'mobilesentrix'
         limit = int(request.args.get('limit', 50))
         offset = int(request.args.get('offset', 0))
-        change_types = request.args.getlist('change_types') or ['price', 'stock', 'description']
+        default_change_types = ['new', 'price', 'stock', 'description']
+        requested_change_types = request.args.getlist('change_types')
+        change_types = requested_change_types or default_change_types
         from_date = request.args.get('from')
         to_date = request.args.get('to')
         search_query = request.args.get('q', '').strip()
