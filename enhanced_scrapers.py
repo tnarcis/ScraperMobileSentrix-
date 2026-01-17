@@ -27,6 +27,7 @@ class ScrapedItem:
     category_path: str = ""
     scraped_at: str = ""
     source: str = "enhanced_scraper"
+    description: str = ""
 
 def clean_text(text: str) -> str:
     """Clean and normalize text content"""
@@ -121,19 +122,16 @@ class MobileSentrixEngine(BaseScrapeEngine):
             return []
     
     def parse_product_card(self, card_elem, category_url: str, category_path: str = "") -> Optional[ScrapedItem]:
-        """Simple working product parser"""
+        """Simple working product parser with description extraction"""
         try:
             # Get link and title
             link = card_elem.select_one('a[href]')
             if not link:
                 return None
-            
             title = clean_text(link.get_text())
             href = link.get('href', '')
-            
             if not title or len(title) < 5:
                 return None
-            
             # Make absolute URL
             if href.startswith('/'):
                 product_url = f"https://www.mobilesentrix.com{href}"
@@ -141,24 +139,21 @@ class MobileSentrixEngine(BaseScrapeEngine):
                 product_url = href
             else:
                 return None
-            
             # Get price
             price_text = ""
             price_value = None
-            
             for price_selector in ['.price', '[class*="price"]']:
                 price_elem = card_elem.select_one(price_selector)
                 if price_elem:
                     price_text = clean_text(price_elem.get_text())
                     if '$' in price_text:
-                        price_match = re.search(r'\\$?([\\d,]+\\.?\\d*)', price_text.replace(',', ''))
+                        price_match = re.search(r'\$?([\d,]+\.?\d*)', price_text.replace(',', ''))
                         if price_match:
                             try:
                                 price_value = float(price_match.group(1))
                             except:
                                 pass
                         break
-            
             # Get image
             image_url = ""
             img = card_elem.select_one('img')
@@ -166,7 +161,19 @@ class MobileSentrixEngine(BaseScrapeEngine):
                 image_url = img.get('src', '') or img.get('data-src', '')
                 if image_url and image_url.startswith('/'):
                     image_url = f"https://www.mobilesentrix.com{image_url}"
-            
+            # Get description from product page
+            description = ""
+            try:
+                headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+                resp = self.session.get(product_url, headers=headers, timeout=10)
+                if resp.status_code == 200:
+                    prod_soup = BeautifulSoup(resp.text, 'html.parser')
+                    # Caută descrierea în câteva locuri comune
+                    desc_elem = prod_soup.select_one('.product.attribute.description, #description, .description, .product-description, [itemprop="description"]')
+                    if desc_elem:
+                        description = clean_text(desc_elem.get_text())
+            except Exception:
+                pass
             return ScrapedItem(
                 title=title,
                 url=product_url,
@@ -177,9 +184,9 @@ class MobileSentrixEngine(BaseScrapeEngine):
                 image_url=image_url,
                 category_path=category_path,
                 scraped_at=datetime.utcnow().isoformat() + 'Z',
-                source="mobilesentrix_working"
+                source="mobilesentrix_working",
+                description=description
             )
-            
         except Exception:
             return None
 
